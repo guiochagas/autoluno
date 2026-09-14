@@ -444,27 +444,29 @@ def texto_corpo(curso_handle) -> str:
     return normalizar(corpo)
 
 
-def confirmar_visivel() -> bool:
-    for botao in _botoes():
-        texto = normalizar(botao.text or "")
-        if not texto or not botao_habilitado(botao):
-            continue
-        if any(palavra in texto for palavra in PALAVRAS_CONFIRMAR):
-            return True
-    return False
-
-
 def aguardar_nova_questao(corpo_antes: str) -> bool:
-    """Espera a página trocar para a próxima questão (com o botão de
-    confirmar habilitado). Retorna False se parecer que acabaram as questões."""
+    """Espera o corpo da página mudar para a próxima questão e estabilizar
+    (2 leituras iguais seguidas). Retorna False se parecer que acabaram as
+    questões."""
     fim = time.time() + ESPERA_NOVA_QUESTAO
+    ultimo_corpo = None
     while time.time() < fim:
         try:
             corpo = texto_corpo(driver.current_window_handle)
         except Exception:
             corpo = ""
-        if corpo and corpo != corpo_antes and confirmar_visivel():
-            return True
+        if corpo and corpo != corpo_antes:
+            if ultimo_corpo is None:
+                ultimo_corpo = corpo
+            elif corpo == ultimo_corpo:
+                time.sleep(1)
+                return True
+            else:
+                ultimo_corpo = corpo
+        else:
+            ultimo_corpo = None
+        print(f"[aguardando] len(corpo_antes)={len(corpo_antes)} "
+              f"len(corpo)={len(corpo)}")
         time.sleep(2)
     return False
 
@@ -502,6 +504,9 @@ def processar_uma_questao() -> bool:
 
     # Cola a pergunta (rápido e confiável) e envia
     mensagem = INSTRUCAO + "\n\n" + pergunta
+    print("---- DEBUG: QUESTÃO ENVIADA AO GEMINI ----")
+    print(mensagem)
+    print("---- FIM DO DEBUG ----")
     pyperclip.copy(mensagem)
     time.sleep(0.2)
     pyautogui.hotkey("ctrl", "v")
