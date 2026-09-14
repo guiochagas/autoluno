@@ -29,7 +29,9 @@ O programa:
 - Manda para o Gemini com a instrução de retornar apenas a resposta correta;
 - Cola a resposta na busca (`Ctrl+F`);
 - Marca a alternativa que corresponde à resposta;
-- Clica em "Confirmar resposta" e depois em "Ir para a próxima questão".
+- Clica em "Confirmar resposta" e depois em "Ir para a próxima questão";
+- **Repete sozinho** para a próxima questão enquanto houver, até acabar a
+  lista. Para encerrar, pressione **Ctrl+C** no terminal.
 
 ## Arquivos
 

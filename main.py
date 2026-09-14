@@ -1,5 +1,6 @@
 import re
 import sys
+import threading
 import time
 import unicodedata
 from datetime import datetime
@@ -10,7 +11,6 @@ import pyperclip
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 
 CDP_PORT = 9222
 GEMINI_URL = "gemini.google.com"
@@ -55,9 +55,12 @@ PALAVRAS_PROXIMA = [
 ]
 
 ESPERA_BOTAO = 10  # segundos para confirmar e ir para a próxima questão
+ESPERA_NOVA_QUESTAO = 30  # segundos aguardando a próxima questão carregar
 
 contador = 0
 driver = None
+iniciar_evento = threading.Event()
+loop_rodando = False
 
 
 # -----------------------------
@@ -391,6 +394,17 @@ def clicar_na_tela(botao) -> None:
         driver.execute_script("arguments[0].click();", botao)
 
 
+def _botoes():
+    botoes = []
+    for seletor in ("button", "[role=button]", "a.btn",
+                    "input[type=submit]"):
+        try:
+            botoes += driver.find_elements(By.CSS_SELECTOR, seletor)
+        except Exception:
+            continue
+    return botoes
+
+
 def clicar_proxima() -> bool:
     """Clica em 'Confirmar resposta' (se houver) e depois no botão
     'ir para a próxima questão' quando habilitado."""
@@ -398,15 +412,7 @@ def clicar_proxima() -> bool:
     confirmado = False
 
     while time.time() < fim:
-        botoes = []
-        for seletor in ("button", "[role=button]", "a.btn",
-                        "input[type=submit]"):
-            try:
-                botoes += driver.find_elements(By.CSS_SELECTOR, seletor)
-            except Exception:
-                continue
-
-        for botao in botoes:
+        for botao in _botoes():
             texto = normalizar(botao.text or "")
             if not texto or not botao_habilitado(botao):
                 continue
@@ -432,93 +438,148 @@ def clicar_proxima() -> bool:
 # -----------------------------
 # FLUXO PRINCIPAL (F8)
 # -----------------------------
-def fluxo_f8():
-    global contador, driver
+def texto_corpo(curso_handle) -> str:
+    driver.switch_to.window(curso_handle)
+    corpo = driver.execute_script("return document.body.innerText;") or ""
+    return normalizar(corpo)
+
+
+def confirmar_visivel() -> bool:
+    for botao in _botoes():
+        texto = normalizar(botao.text or "")
+        if not texto or not botao_habilitado(botao):
+            continue
+        if any(palavra in texto for palavra in PALAVRAS_CONFIRMAR):
+            return True
+    return False
+
+
+def aguardar_nova_questao(corpo_antes: str) -> bool:
+    """Espera a página trocar para a próxima questão (com o botão de
+    confirmar habilitado). Retorna False se parecer que acabaram as questões."""
+    fim = time.time() + ESPERA_NOVA_QUESTAO
+    while time.time() < fim:
+        try:
+            corpo = texto_corpo(driver.current_window_handle)
+        except Exception:
+            corpo = ""
+        if corpo and corpo != corpo_antes and confirmar_visivel():
+            return True
+        time.sleep(2)
+    return False
+
+
+def processar_uma_questao() -> bool:
+    """Executa o ciclo de UMA questão. Retorna True se avançou para outra
+    questão, False se deve encerrar."""
+    global driver
+    if driver is None:
+        print("Sem conexão com o Chrome. Reinicie o programa.")
+        return False
+
+    curso_handle = driver.current_window_handle
+    corpo_antes = texto_corpo(curso_handle)
+
+    pergunta = ler_pergunta(curso_handle)
+    if not pergunta:
+        print("Nada foi selecionado na página da faculdade.")
+        return False
+
+    gemini_handle = achar_aba(GEMINI_URL)
+    if gemini_handle is None:
+        print("Aba do Gemini não encontrada. Abra https://gemini.google.com")
+        return False
+    print("Aba do Gemini encontrada pela URL.")
+
+    driver.switch_to.window(gemini_handle)
+
+    caixa = acharc_caixa()
+    if caixa is None:
+        print("Campo de texto do Gemini não encontrado.")
+        return False
+
+    clicar(caixa)
+
+    # Cola a pergunta (rápido e confiável) e envia
+    mensagem = INSTRUCAO + "\n\n" + pergunta
+    pyperclip.copy(mensagem)
+    time.sleep(0.2)
+    pyautogui.hotkey("ctrl", "v")
+    time.sleep(0.5)
+    pyautogui.press("enter")
+    print("Pergunta enviada. Aguardando resposta do Gemini...")
+
+    modelos_inicial = len(
+        driver.find_elements(By.CSS_SELECTOR, "model-response")
+    )
+    resposta = limpar_resposta(esperar_resposta(modelos_inicial))
+
+    if not resposta:
+        print("Resposta vazia recebida.")
+        return False
+
+    pyperclip.copy(resposta)
+    print(f"Resposta copiada ({len(resposta)} caracteres).")
+
+    # Volta para a página da faculdade e busca a resposta
+    driver.switch_to.window(curso_handle)
+    time.sleep(0.3)
+    pyautogui.hotkey("ctrl", "f")
+    time.sleep(0.3)
+    pyautogui.hotkey("ctrl", "v")
+    print("Resposta colada na busca.")
+
+    # Fecha a barra de busca para os cliques não serem atrapalhados
+    time.sleep(0.3)
+    pyautogui.press("esc")
+    time.sleep(0.3)
+
+    # Seleciona a alternativa que contém a resposta
+    if not selecionar_alternativa(resposta):
+        print("Resposta não encontrada em nenhuma alternativa. "
+              "Encerrando o loop.")
+        return False
+
+    time.sleep(0.5)
+    if not clicar_proxima():
+        print("Botão 'Confirmar resposta' / 'próxima questão' não apareceu. "
+              "Encerrando o loop.")
+        return False
+
+    print("Resposta confirmada e 'Ir para a próxima questão' clicado.")
+
+    if aguardar_nova_questao(corpo_antes):
+        print("Próxima questão carregada.")
+        return True
+
+    print("Nenhuma nova questão apareceu (parece ser o fim da lista).")
+    return False
+
+
+def rodar_sessao() -> None:
+    """Loop automático de questões até acabarem ou o usuário dar Ctrl+C."""
+    global contador, loop_rodando
     if driver is None:
         print("Sem conexão com o Chrome. Reinicie o programa.")
         return
 
-    contador += 1
-    print(f"\nExecução #{contador}")
-
-    curso_handle = driver.current_window_handle
-
+    loop_rodando = True
+    print("\nLoop automático iniciado. Use Ctrl+C para encerrar.")
     try:
-        pergunta = ler_pergunta(curso_handle)
-        if not pergunta:
-            print("Nada foi selecionado na página da faculdade.")
-            return
-
-        gemini_handle = achar_aba(GEMINI_URL)
-        if gemini_handle is None:
-            print("Aba do Gemini não encontrada. Abra https://gemini.google.com")
-            return
-        print("Aba do Gemini encontrada pela URL.")
-
-        driver.switch_to.window(gemini_handle)
-
-        caixa = acharc_caixa()
-        if caixa is None:
-            print("Campo de texto do Gemini não encontrado.")
-            return
-
-        clicar(caixa)
-
-        # Cola a pergunta (rápido e confiável) e envia
-        mensagem = INSTRUCAO + "\n\n" + pergunta
-        pyperclip.copy(mensagem)
-        time.sleep(0.2)
-        pyautogui.hotkey("ctrl", "v")
-        time.sleep(0.5)
-        pyautogui.press("enter")
-        print("Pergunta enviada. Aguardando resposta do Gemini...")
-
-        modelos_inicial = len(
-            driver.find_elements(By.CSS_SELECTOR, "model-response")
-        )
-        resposta = limpar_resposta(esperar_resposta(modelos_inicial))
-
-        if not resposta:
-            print("Resposta vazia recebida.")
-            return
-
-        pyperclip.copy(resposta)
-        print(f"Resposta copiada ({len(resposta)} caracteres).")
-
-        # Volta para a página da faculdade e busca a resposta
-        driver.switch_to.window(curso_handle)
-        time.sleep(0.3)
-        pyautogui.hotkey("ctrl", "f")
-        time.sleep(0.3)
-        pyautogui.hotkey("ctrl", "v")
-        print("Resposta colada na busca.")
-
-        # Fecha a barra de busca para os cliques não serem atrapalhados
-        time.sleep(0.3)
-        pyautogui.press("esc")
-        time.sleep(0.3)
-
-# Seleciona a alternativa que contém a resposta
-        if selecionar_alternativa(resposta):
-            time.sleep(0.5)
-            if clicar_proxima():
-                print("Resposta confirmada e 'Ir para a próxima questão' "
-                      "clicado.")
-            else:
-                print("Botão 'Confirmar resposta' / 'próxima questão' não "
-                      "apareceu em tempo hábil.")
-        else:
-            print("Resposta não encontrada em nenhuma alternativa. "
-                  "Nenhum clique foi feito.")
-
-        print(f"Execução #{contador} finalizada.")
-
-    except Exception as e:
-        print(f"ERRO na execução #{contador}: {e}")
-
+        while True:
+            contador += 1
+            print(f"\n=== Questão #{contador} ===")
+            if not processar_uma_questao():
+                break
+            print(datetime.now().strftime("%H:%M:%S"))
+        print("\nLoop encerrado.")
     finally:
-        agora = datetime.now().strftime("%H:%M:%S")
-        print(agora)
+        loop_rodando = False
+
+
+def fluxo_f8():
+    """Tecla F8: apenas sinaliza para iniciar o loop na thread principal."""
+    iniciar_evento.set()
 
 
 # -----------------------------
@@ -529,6 +590,8 @@ def main() -> None:
         sys.exit(1)
 
     print("Pressione F8 no Chrome, sobre a página da faculdade, para iniciar.")
+    print("O programa roda um loop automático até acabarem as questões; "
+          "use Ctrl+C para encerrar.")
     print("Se o Chrome acabou de ser aberto, entre no Google/Gemini e na "
           "faculdade 1 vez.")
     keyboard.add_hotkey("F8", fluxo_f8)
@@ -537,7 +600,16 @@ def main() -> None:
     # keyboard.add_hotkey("F9", outra_funcao)
     # keyboard.add_hotkey("F10", outra_funcao)
 
-    keyboard.wait()
+    try:
+        while True:
+            if not iniciar_evento.wait(timeout=0.3):
+                continue
+            iniciar_evento.clear()
+            if loop_rodando:
+                continue
+            rodar_sessao()
+    except KeyboardInterrupt:
+        print("\nPrograma encerrado pelo usuário (Ctrl+C).")
 
 
 if __name__ == "__main__":
