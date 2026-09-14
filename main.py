@@ -562,12 +562,14 @@ def processar_uma_questao() -> bool:
 
 
 def rodar_sessao() -> None:
-    """Loop automático de questões até acabarem ou o usuário dar Ctrl+C."""
+    """Loop automático de questões até acabarem ou o usuário dar Ctrl+C.
+    Ao terminar, volta ao estado inicial aguardando F8."""
     global contador, loop_rodando
     if driver is None:
         print("Sem conexão com o Chrome. Reinicie o programa.")
         return
 
+    contador = 0
     loop_rodando = True
     print("\nLoop automático iniciado. Use Ctrl+C para encerrar.")
     try:
@@ -580,6 +582,9 @@ def rodar_sessao() -> None:
         print("\nLoop encerrado.")
     finally:
         loop_rodando = False
+        iniciar_evento.clear()
+    print("Voltando ao estado inicial. Pressione F8 para rodar novamente.")
+    print("Dica: para sair do programa, pressione Ctrl+C.")
 
 
 def fluxo_f8():
