@@ -1,0 +1,15 @@
+# Perfil local do Chrome (cache/logins, não versionar)
+perfil_chrome/
+teste_perfil/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.log
+
+# IDE
+.vscode/
+.idea/
